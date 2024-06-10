@@ -1,6 +1,7 @@
+const { simpleParser } = require('mailparser');
 const nodemailer = require('nodemailer');
 const Imap = require("imap")
-const simpleParser = require('mailparser').simpleParser;
+// const simpleParser = require('mailparser').simpleParser;
 
 
 // Create a transporter using SMTP transport
@@ -44,12 +45,14 @@ const sendMail = async (req, res) => {
 };
 
 
+
 const myInbox = async (req, res) => {
     const imap = new Imap({
         user: req.user.email,
         password: req.user.password,
         host: 'localserver.com',
         port: 143,
+        tls: false // or true if you're using TLS
     });
 
     return new Promise((resolve, reject) => {
@@ -60,34 +63,43 @@ const myInbox = async (req, res) => {
                     reject(err);
                     return;
                 }
-
                 imap.search(['ALL'], (searchErr, results) => {
                     if (searchErr) {
                         imap.end();
                         reject(searchErr);
                         return;
                     }
-
                     const fetch = imap.fetch(results, {
                         bodies: ''
                     });
                     const emails = [];
 
                     fetch.on('message', (msg) => {
-                        let email = {};
+                        let email = { headers: {} };
 
                         msg.on('body', (stream) => {
                             let buffer = '';
                             stream.on('data', (chunk) => {
                                 buffer += chunk.toString('utf8');
                             });
-                            stream.once('end', () => {
-                                email.body = buffer;
+                            stream.once('end', async () => {
+                                try {
+                                    const parsed = await simpleParser(buffer);
+                                    email.from = parsed.from.text;
+                                    email.to = parsed.to.text;
+                                    email.subject = parsed.subject;
+                                    email.date = parsed.date;
+                                    email.text = parsed.text;
+                                    email.html = parsed.html;
+                                } catch (parseErr) {
+                                    console.error('Failed to parse email body:', parseErr);
+                                }
                             });
                         });
 
                         msg.once('attributes', (attrs) => {
                             email.flags = attrs.flags;
+                            email.read = attrs.flags.includes('\\Seen');
                         });
 
                         msg.once('end', () => {
@@ -160,20 +172,37 @@ const myInbox = async (req, res) => {
 
 
 
+
 const sentMails = async (req, res) => {
     const imap = new Imap({
         user: req.user.email,
         password: req.user.password,
         host: 'localserver.com',
         port: 143,
+        tls: false // or true if you're using TLS
     });
+
+    const handleError = (err, message) => {
+        console.error(message, err);
+        res.status(500).json({
+            error: message
+        });
+        imap.end();
+    };
 
     imap.once('ready', () => {
         imap.openBox('SENT', false, (err, box) => {
             if (err) {
-                res.status(500).json({
-                    error: 'Failed to open SENT folder'
+                handleError(err, 'Failed to open SENT folder');
+                return;
+            }
+            if (!box.messages.total) {
+                // If there are no messages, respond immediately
+                res.status(200).json({
+                    status: 'success',
+                    emails: []
                 });
+                imap.end();
                 return;
             }
 
@@ -190,18 +219,30 @@ const sentMails = async (req, res) => {
                 let email = {};
 
                 msg.on('body', (stream, info) => {
-                    // Use async/await to parse the email body
-                    (async () => {
-                        const parsedEmail = await simpleParser(stream);
-                        email.body = parsedEmail.text;
-                        email.attachments = parsedEmail.attachments;
-                        emailCounter++;
+                    let buffer = '';
+                    stream.on('data', (chunk) => {
+                        buffer += chunk.toString('utf8');
+                    });
+                    stream.once('end', async () => {
+                        try {
+                            const parsedEmail = await simpleParser(buffer);
+                            email.body = parsedEmail.text;
+                            email.html = parsedEmail.html;
+                            email.attachments = parsedEmail.attachments;
+                        } catch (parseErr) {
+                            console.error('Failed to parse email body:', parseErr);
+                        }
 
+                        emailCounter++;
                         if (emailCounter === box.messages.total) {
                             // All emails processed, send response
-                            res.status(200).json(emails);
+                            res.status(200).json({
+                                status: 'success',
+                                emails
+                            });
+                            imap.end();
                         }
-                    })();
+                    });
                 });
 
                 msg.once('attributes', (attrs) => {
@@ -219,16 +260,16 @@ const sentMails = async (req, res) => {
 
             fetch.once('end', () => {
                 console.log('Done fetching all messages!');
-                imap.end();
+            });
+
+            fetch.once('error', (fetchErr) => {
+                handleError(fetchErr, 'Error fetching messages');
             });
         });
     });
 
     imap.once('error', (err) => {
-        console.error('IMAP error:', err);
-        res.status(500).json({
-            error: 'IMAP connection error'
-        });
+        handleError(err, 'IMAP connection error');
     });
 
     imap.once('end', () => {
@@ -242,8 +283,129 @@ const sentMails = async (req, res) => {
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+const saveToDrafts = async (req, res) => {
+    try {
+        if (!req.user || !req.user.email || !req.user.password) {
+            throw new Error('User email or password is missing');
+        }
+
+        const imap = new Imap({
+            user: req.user.email,
+            password: req.user.password,
+            host: 'localserver.com',
+            port: 143,
+            tls: false // or true if you're using TLS
+        });
+
+        const handleError = (err, message) => {
+            console.error(message, err);
+            res.status(500).json({
+                error: message
+            });
+            imap.end();
+        };
+
+        const { from, to, subject, text, html } = req.body;
+
+        // Create the raw email string
+        let transporter = nodemailer.createTransport({
+            sendmail: true,
+            newline: 'unix',
+            path: '/usr/sbin/sendmail'
+        });
+
+        let emailMessage = {
+            from,
+            to,
+            subject,
+            text,
+            html
+        };
+
+        transporter.sendMail(emailMessage, (err, info) => {
+            if (err) {
+                handleError(err, 'Failed to create email message');
+                return;
+            }
+
+            let rawEmail = info.message.toString();
+
+            imap.once('ready', () => {
+                imap.openBox('DRAFTS', false, (err, box) => {
+                    if (err) {
+                        handleError(err, 'Failed to open DRAFTS folder');
+                        return;
+                    }
+
+                    imap.append(rawEmail, { mailbox: 'DRAFTS' }, (err) => {
+                        if (err) {
+                            handleError(err, 'Failed to save email to DRAFTS');
+                            return;
+                        }
+
+                        res.status(200).json({
+                            status: 'success',
+                            message: 'Email saved to drafts'
+                        });
+                        imap.end();
+                    });
+                });
+            });
+
+            imap.once('error', (err) => {
+                handleError(err, 'IMAP connection error');
+            });
+
+            imap.once('end', () => {
+                console.log('Connection ended');
+            });
+
+            imap.connect();
+        });
+
+    } catch (error) {
+        console.error('Error:', error);
+        
+        res.status(500).json({
+            error: error.message
+        });
+    }
+};
+
+
+
+
+
+
+
+
 module.exports = {
     sendMail,
     myInbox,
-    sentMails
+    sentMails,
+    saveToDrafts
 };
