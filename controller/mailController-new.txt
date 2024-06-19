@@ -1,0 +1,351 @@
+import asyncErrorHandler from "../utils/asyncErrorHandler.js";
+import nodemailer from "nodemailer";
+import Imap from "imap";
+import { simpleParser } from "mailparser";
+
+// Configuration function for nodemailer transporter
+const createTransporter = (user, password) => {
+    return nodemailer.createTransport({
+        host: "localhost",
+        port: 25,
+        secure: false,
+        auth: {
+            user: "accounts@localserver.com",
+            pass: "test1234"
+        }
+    });
+};
+
+// Configuration function for IMAP connection
+const createImap = (user, password) => {
+    return new Imap({
+        user: "accounts@localserver.com",
+        password: "test1234",
+        host: 'localserver.com',
+        port: 143,
+        tls: false // Set to true if using TLS
+    });
+};
+
+// Send mail controller
+const sendMail = asyncErrorHandler(async (req, res) => {
+    const transporter = createTransporter();
+    const mailOptions = {
+        from: "accounts",
+        to: req.body.to,
+        subject: req.body.subject,
+        text: req.body.body
+    };
+    await transporter.sendMail(mailOptions);
+    res.status(200).json({ status: "success" });
+});
+
+// Fetch emails from inbox
+const myInbox = async (req, res) => {
+    const imap = createImap();
+
+    return new Promise((resolve, reject) => {
+        imap.once('ready', () => {
+            imap.openBox('INBOX', false, (err, box) => {
+                if (err) {
+                    imap.end();
+                    reject(err);
+                    return;
+                }
+                imap.search(['ALL'], (searchErr, results) => {
+                    if (searchErr) {
+                        imap.end();
+                        reject(searchErr);
+                        return;
+                    }
+                    const fetch = imap.fetch(results, { bodies: '' });
+                    const emails = [];
+
+                    fetch.on('message', (msg) => {
+                        let email = { headers: {} };
+
+                        msg.on('body', (stream) => {
+                            let buffer = '';
+                            stream.on('data', (chunk) => {
+                                buffer += chunk.toString('utf8');
+                            });
+                            stream.once('end', async () => {
+                                try {
+                                    const parsed = await simpleParser(buffer);
+                                    email.from = parsed.from.text;
+                                    email.to = parsed.to.text;
+                                    email.subject = parsed.subject;
+                                    email.date = parsed.date;
+                                    email.text = parsed.text;
+                                    email.html = parsed.html;
+                                    email.attachments = parsed.attachments;
+                                } catch (parseErr) {
+                                    console.error('Failed to parse email body:', parseErr);
+                                }
+                            });
+                        });
+
+                        msg.once('attributes', (attrs) => {
+                            email.flags = attrs.flags;
+                            email.read = attrs.flags.includes('\\Seen');
+                        });
+
+                        msg.once('end', () => {
+                            emails.push(email);
+                        });
+                    });
+
+                    fetch.once('end', () => {
+                        imap.end();
+                        res.status(200).json({ status: "success", emails });
+                        resolve(emails);
+                    });
+                });
+            });
+        });
+
+        imap.once('error', (err) => {
+            imap.end();
+            reject(err);
+        });
+
+        imap.connect();
+    });
+};
+
+// Fetch emails from sent items
+const sentMails = async (req, res) => {
+    const imap = createImap();
+
+    const openBox = (boxName) => {
+        return new Promise((resolve, reject) => {
+            imap.openBox(boxName, false, (err, box) => {
+                if (err) {
+                    return reject(err);
+                }
+                resolve(box);
+            });
+        });
+    };
+
+    const searchMessages = (criteria) => {
+        return new Promise((resolve, reject) => {
+            imap.search(criteria, (err, results) => {
+                if (err) {
+                    return reject(err);
+                }
+                resolve(results);
+            });
+        });
+    };
+
+    const fetchMessages = (results, options) => {
+        return new Promise((resolve, reject) => {
+            const fetch = imap.fetch(results, options);
+            resolve(fetch);
+            fetch.once('error', (fetchErr) => reject(fetchErr));
+        });
+    };
+
+    const handleError = (err, message) => {
+        console.error(message, err);
+        res.status(500).json({ error: message });
+        imap.end();
+    };
+
+    imap.once('error', (err) => handleError(err, 'IMAP connection error'));
+
+    imap.once('ready', async () => {
+        try {
+            const box = await openBox('SENT');
+            if (!box.messages.total) {
+                res.status(200).json({ status: 'success', emails: [] });
+                imap.end();
+                return;
+            }
+
+            const results = await searchMessages(['ALL']);
+            const fetchOptions = { bodies: '', struct: true, envelope: true };
+            const fetch = await fetchMessages(results, fetchOptions);
+
+            const emails = [];
+            let emailCounter = 0;
+
+            fetch.on('message', (msg, seqno) => {
+                let email = {};
+
+                msg.on('body', (stream) => {
+                    let buffer = '';
+                    stream.on('data', (chunk) => {
+                        buffer += chunk.toString('utf8');
+                    });
+                    stream.once('end', async () => {
+                        try {
+                            const parsedEmail = await simpleParser(buffer);
+                            email.from = parsedEmail.from.text;
+                            email.to = parsedEmail.to.text;
+                            email.date = parsedEmail.date;
+                            email.body = parsedEmail.text;
+                            email.html = parsedEmail.html;
+                            email.attachments = parsedEmail.attachments;
+                        } catch (parseErr) {
+                            console.error('Failed to parse email body:', parseErr);
+                        }
+
+                        emails.push(email);
+                        emailCounter++;
+
+                        if (emailCounter === results.length) {
+                            res.status(200).json({ status: 'success', emails });
+                            imap.end();
+                        }
+                    });
+                });
+
+                msg.once('attributes', (attrs) => {
+                    email.from = attrs.envelope.from[0].address;
+                    email.to = attrs.envelope.to[0].address;
+                    email.subject = attrs.envelope.subject;
+                    email.date = attrs.envelope.date;
+                    email.flags = attrs.flags;
+                });
+            });
+
+            fetch.once('end', () => {
+                console.log('Done fetching all messages!');
+            });
+        } catch (err) {
+            handleError(err, 'Failed to fetch sent emails');
+        }
+    });
+
+    imap.connect();
+};
+
+// Fetch email by UID or Message-ID controller
+const fetchMailById = async (req, res) => {
+    const { id, type } = req.params; // Assume type is 'uid' or 'messageId'
+    const imap = createImap();
+
+    const openBox = (boxName) => {
+        return new Promise((resolve, reject) => {
+            imap.openBox(boxName, false, (err, box) => {
+                if (err) {
+                    return reject(err);
+                }
+                resolve(box);
+            });
+        });
+    };
+
+    const searchMessages = (criteria) => {
+        return new Promise((resolve, reject) => {
+            imap.search(criteria, (err, results) => {
+                if (err) {
+                    return reject(err);
+                }
+                resolve(results);
+            });
+        });
+    };
+
+    const fetchMessages = (results, options) => {
+        return new Promise((resolve, reject) => {
+            const fetch = imap.fetch(results, options);
+            resolve(fetch);
+            fetch.once('error', (fetchErr) => reject(fetchErr));
+        });
+    };
+
+    const handleError = (err, message) => {
+        console.error(message, err);
+        res.status(500).json({ error: message });
+        imap.end();
+    };
+
+    imap.once('error', (err) => handleError(err, 'IMAP connection error'));
+
+    imap.once('ready', async () => {
+        try {
+            const mailboxes = ['INBOX', 'SENT'];
+            const emails = [];
+
+            for (const mailbox of mailboxes) {
+                await openBox(mailbox);
+
+                const criteria = type === 'uid' ? [id] : [['HEADER', 'MESSAGE-ID', id]];
+                const results = await searchMessages(criteria);
+
+                if (results.length === 0) {
+                    console.log(`No messages found with the given ${type} in ${mailbox}`);
+                    continue;
+                }
+
+                const fetchOptions = { bodies: '', struct: true, envelope: true };
+                const fetch = await fetchMessages(results, fetchOptions);
+
+                fetch.on('message', (msg, seqno) => {
+                    let email = {};
+
+                    msg.on('body', (stream) => {
+                        let buffer = '';
+                        stream.on('data', (chunk) => {
+                            buffer += chunk.toString('utf8');
+                        });
+                        stream.once('end', async () => {
+                            try {
+                                const parsedEmail = await simpleParser(buffer);
+                                email.from = parsedEmail.from.text;
+                                email.to = parsedEmail.to.text;
+                                email.date = parsedEmail.date;
+                                email.body = parsedEmail.text;
+                                email.html = parsedEmail.html;
+                                email.attachments = parsedEmail.attachments;
+                            } catch (parseErr) {
+                                console.error('Failed to parse email body:', parseErr);
+                            }
+
+                            emails.push(email);
+                            res.status(200).json({ status: 'success', email });
+                            imap.end();
+                        });
+                    });
+
+                    msg.once('attributes', (attrs) => {
+                        email.from = attrs.envelope.from[0].address;
+                        email.to = attrs.envelope.to[0].address;
+                        email.subject = attrs.envelope.subject;
+                        email.date = attrs.envelope.date;
+                        email.flags = attrs.flags;
+                    });
+                });
+
+                fetch.once('end', () => {
+                    console.log('Done fetching message from', mailbox);
+                });
+            }
+        } catch (err) {
+            handleError(err, 'Failed to fetch email by ID');
+        }
+    });
+
+    imap.connect();
+};
+
+// Drafts and Trash controllers
+const drafts = asyncErrorHandler(async (req, res) => {
+    console.log("I am drafts.");
+});
+
+const trash = asyncErrorHandler(async (req, res) => {
+    console.log("I am trash.");
+});
+
+export {
+    sendMail,
+    myInbox,
+    sentMails,
+    fetchMailById,
+    drafts,
+    trash
+};
