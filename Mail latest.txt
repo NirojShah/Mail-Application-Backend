@@ -1,0 +1,522 @@
+to fetch starred mails
+
+const Imap = require('imap');
+const { simpleParser } = require('mailparser');
+
+const imapConfig = {
+  user: 'your-email@example.com',
+  password: 'your-password',
+  host: 'imap.your-email-provider.com',
+  port: 993,
+  tls: true
+};
+
+const imap = new Imap(imapConfig);
+
+function openInbox(cb) {
+  imap.openBox('INBOX', true, cb);
+}
+
+imap.once('ready', function () {
+  openInbox(function (err, box) {
+    if (err) throw err;
+    imap.search(['FLAGGED'], function (err, results) {
+      if (err) throw err;
+
+      if (results.length === 0) {
+        console.log('No starred emails found.');
+        imap.end();
+        return;
+      }
+
+      const fetch = imap.fetch(results, { bodies: '' });
+
+      fetch.on('message', function (msg, seqno) {
+        msg.on('body', function (stream, info) {
+          simpleParser(stream, (err, parsed) => {
+            if (err) throw err;
+            console.log(`Subject: ${parsed.subject}`);
+            console.log(`From: ${parsed.from.text}`);
+            console.log(`Date: ${parsed.date}`);
+          });
+        });
+      });
+
+      fetch.once('error', function (err) {
+        console.log('Fetch error: ' + err);
+      });
+
+      fetch.once('end', function () {
+        console.log('Done fetching all messages!');
+        imap.end();
+      });
+    });
+  });
+});
+
+imap.once('error', function (err) {
+  console.log(err);
+});
+
+imap.once('end', function () {
+  console.log('Connection ended');
+});
+
+imap.connect();
+
+
+
+
+
+
+to set starr
+
+
+
+
+
+function addStarToEmail(uid) {
+  imap.addFlags(uid, '\\Flagged', function (err) {
+    if (err) {
+      console.log('Error adding flag: ' + err);
+    } else {
+      console.log('Flag added to email UID: ' + uid);
+    }
+    imap.end();
+  });
+}
+
+imap.once('ready', function () {
+  openInbox(function (err, box) {
+    if (err) throw err;
+    
+    // Example: Add star to the first email in the inbox
+    const exampleUid = 1; // Replace with actual UID of the email
+    addStarToEmail(exampleUid);
+  });
+});
+
+imap.connect();
+
+
+
+
+
+
+fetch by threads
+
+
+
+const Imap = require('imap');
+const { simpleParser } = require('mailparser');
+
+const imapConfig = {
+  user: 'your-email@example.com',
+  password: 'your-password',
+  host: 'imap.your-email-provider.com',
+  port: 993,
+  tls: true
+};
+
+const imap = new Imap(imapConfig);
+
+function openInbox(cb) {
+  imap.openBox('INBOX', true, cb);
+}
+
+imap.once('ready', function () {
+  openInbox(function (err, box) {
+    if (err) throw err;
+    
+    // Fetch all emails
+    imap.search(['ALL'], function (err, results) {
+      if (err) throw err;
+
+      if (results.length === 0) {
+        console.log('No emails found.');
+        imap.end();
+        return;
+      }
+
+      const fetch = imap.fetch(results, { bodies: '' });
+
+      const emails = [];
+
+      fetch.on('message', function (msg, seqno) {
+        msg.on('body', function (stream, info) {
+          simpleParser(stream, (err, parsed) => {
+            if (err) throw err;
+            emails.push(parsed);
+          });
+        });
+      });
+
+      fetch.once('error', function (err) {
+        console.log('Fetch error: ' + err);
+      });
+
+      fetch.once('end', function () {
+        console.log('Done fetching all messages!');
+        const threads = groupEmailsByThread(emails);
+        console.log(threads);
+        imap.end();
+      });
+    });
+  });
+});
+
+imap.once('error', function (err) {
+  console.log(err);
+});
+
+imap.once('end', function () {
+  console.log('Connection ended');
+});
+
+imap.connect();
+
+
+function to organize
+
+
+
+
+function groupEmailsByThread(emails) {
+  const threads = {};
+  const messageIdMap = {};
+
+  emails.forEach(email => {
+    const messageId = email.messageId;
+    const inReplyTo = email.inReplyTo;
+    const references = email.references || [];
+
+    // Create a new thread if not exist
+    if (!threads[messageId]) {
+      threads[messageId] = {
+        messageId: messageId,
+        emails: []
+      };
+    }
+    
+    // Add email to its thread
+    threads[messageId].emails.push(email);
+    messageIdMap[messageId] = threads[messageId];
+
+    // Check if this email is a reply and needs to be added to another thread
+    if (inReplyTo) {
+      if (threads[inReplyTo]) {
+        threads[inReplyTo].emails.push(email);
+      } else {
+        threads[inReplyTo] = {
+          messageId: inReplyTo,
+          emails: [email]
+        };
+      }
+    }
+
+    // Add email to threads referenced in the References header
+    references.forEach(refId => {
+      if (threads[refId]) {
+        threads[refId].emails.push(email);
+      } else {
+        threads[refId] = {
+          messageId: refId,
+          emails: [email]
+        };
+      }
+    });
+  });
+
+  // Remove duplicates from threads
+  Object.keys(threads).forEach(threadId => {
+    const uniqueEmails = [];
+    const emailMap = {};
+    threads[threadId].emails.forEach(email => {
+      if (!emailMap[email.messageId]) {
+        uniqueEmails.push(email);
+        emailMap[email.messageId] = true;
+      }
+    });
+    threads[threadId].emails = uniqueEmails;
+  });
+
+  return Object.values(threads);
+}
+
+
+
+
+
+
+
+
+to fetch list of mails and on click onpen threads
+
+
+
+
+
+const express = require('express');
+const Imap = require('imap');
+const { simpleParser } = require('mailparser');
+
+const app = express();
+const port = 3000;
+
+const imapConfig = {
+  user: 'your-email@example.com',
+  password: 'your-password',
+  host: 'imap.your-email-provider.com',
+  port: 993,
+  tls: true
+};
+
+const imap = new Imap(imapConfig);
+
+function openInbox(cb) {
+  imap.openBox('INBOX', true, cb);
+}
+
+app.get('/emails', (req, res) => {
+  imap.once('ready', function () {
+    openInbox(function (err, box) {
+      if (err) throw err;
+      
+      // Fetch all emails
+      imap.search(['ALL'], function (err, results) {
+        if (err) throw err;
+
+        if (results.length === 0) {
+          res.send('No emails found.');
+          imap.end();
+          return;
+        }
+
+        const fetch = imap.fetch(results, { bodies: '' });
+        const emails = [];
+
+        fetch.on('message', function (msg, seqno) {
+          msg.on('body', function (stream, info) {
+            simpleParser(stream, (err, parsed) => {
+              if (err) throw err;
+              emails.push({
+                uid: seqno,
+                subject: parsed.subject,
+                from: parsed.from.text,
+                date: parsed.date,
+                messageId: parsed.messageId,
+                inReplyTo: parsed.inReplyTo,
+                references: parsed.references || []
+              });
+            });
+          });
+        });
+
+        fetch.once('error', function (err) {
+          console.log('Fetch error: ' + err);
+        });
+
+        fetch.once('end', function () {
+          console.log('Done fetching all messages!');
+          res.json(emails);
+          imap.end();
+        });
+      });
+    });
+  });
+
+  imap.once('error', function (err) {
+    console.log(err);
+    res.status(500).send(err);
+  });
+
+  imap.once('end', function () {
+    console.log('Connection ended');
+  });
+
+  imap.connect();
+});
+
+function groupEmailsByThread(emails) {
+  const threads = {};
+  const messageIdMap = {};
+
+  emails.forEach(email => {
+    const messageId = email.messageId;
+    const inReplyTo = email.inReplyTo;
+    const references = email.references;
+
+    if (!threads[messageId]) {
+      threads[messageId] = {
+        messageId: messageId,
+        emails: []
+      };
+    }
+
+    threads[messageId].emails.push(email);
+    messageIdMap[messageId] = threads[messageId];
+
+    if (inReplyTo && messageIdMap[inReplyTo]) {
+      messageIdMap[inReplyTo].emails.push(email);
+    }
+
+    if (references) {
+      references.forEach(refId => {
+        if (!threads[refId]) {
+          threads[refId] = {
+            messageId: refId,
+            emails: []
+          };
+        }
+        threads[refId].emails.push(email);
+      });
+    }
+  });
+
+  return Object.values(threads);
+}
+
+app.get('/emails/:id/threads', (req, res) => {
+  const emailId = req.params.id;
+
+  imap.once('ready', function () {
+    openInbox(function (err, box) {
+      if (err) throw err;
+      
+      // Fetch all emails
+      imap.search(['ALL'], function (err, results) {
+        if (err) throw err;
+
+        if (results.length === 0) {
+          res.send('No emails found.');
+          imap.end();
+          return;
+        }
+
+        const fetch = imap.fetch(results, { bodies: '' });
+        const emails = [];
+
+        fetch.on('message', function (msg, seqno) {
+          msg.on('body', function (stream, info) {
+            simpleParser(stream, (err, parsed) => {
+              if (err) throw err;
+              emails.push({
+                uid: seqno,
+                subject: parsed.subject,
+                from: parsed.from.text,
+                date: parsed.date,
+                messageId: parsed.messageId,
+                inReplyTo: parsed.inReplyTo,
+                references: parsed.references || []
+              });
+            });
+          });
+        });
+
+        fetch.once('error', function (err) {
+          console.log('Fetch error: ' + err);
+        });
+
+        fetch.once('end', function () {
+          console.log('Done fetching all messages!');
+          const threads = groupEmailsByThread(emails);
+          const selectedThread = threads.find(thread => 
+            thread.emails.some(email => email.uid === parseInt(emailId))
+          );
+          res.json(selectedThread);
+          imap.end();
+        });
+      });
+    });
+  });
+
+  imap.once('error', function (err) {
+    console.log(err);
+    res.status(500).send(err);
+  });
+
+  imap.once('end', function () {
+    console.log('Connection ended');
+  });
+
+  imap.connect();
+});
+
+app.listen(port, () => {
+  console.log(`Server running at http://localhost:${port}`);
+});
+
+
+
+
+
+
+
+fe
+
+
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Email Threads</title>
+  <style>
+    .email-list, .email-thread {
+      margin: 20px;
+    }
+    .email-item {
+      cursor: pointer;
+      margin-bottom: 10px;
+    }
+  </style>
+</head>
+<body>
+  <div class="email-list">
+    <h2>Emails</h2>
+    <ul id="emailList"></ul>
+  </div>
+  <div class="email-thread">
+    <h2>Thread</h2>
+    <ul id="emailThread"></ul>
+  </div>
+
+  <script>
+    document.addEventListener('DOMContentLoaded', function () {
+      fetch('/emails')
+        .then(response => response.json())
+        .then(emails => {
+          const emailList = document.getElementById('emailList');
+          emails.forEach(email => {
+            const li = document.createElement('li');
+            li.className = 'email-item';
+            li.textContent = `${email.subject} - ${email.from} - ${email.date}`;
+            li.dataset.uid = email.uid;
+            emailList.appendChild(li);
+
+            li.addEventListener('click', () => {
+              fetch(`/emails/${email.uid}/threads`)
+                .then(response => response.json())
+                .then(thread => {
+                  const emailThread = document.getElementById('emailThread');
+                  emailThread.innerHTML = '';
+
+                  thread.emails.forEach(threadEmail => {
+                    const threadLi = document.createElement('li');
+                    threadLi.textContent = `${threadEmail.subject} - ${threadEmail.from} - ${threadEmail.date}`;
+                    emailThread.appendChild(threadLi);
+                  });
+                });
+            });
+          });
+        });
+    });
+  </script>
+</body>
+</html>
+
+
+
+
+
